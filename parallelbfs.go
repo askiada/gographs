@@ -58,7 +58,7 @@ func (front *Frontier) Write(low, high *uint32, v uint32) {
 }
 
 // processLevel uses Frontiers to dequeue work from currLevel in ReadBlockSize increments.
-func processLevel(g Graph, currLevel, nextLevel *Frontier, visited *bitvec.ABitVec) {
+func processLevel(g Graph, currLevel, nextLevel *Frontier, visited *bitvec.ABitVec, output []uint32) []uint32 {
 	writeLow, writeHigh := uint32(0), uint32(0)
 	for {
 		readLow, readHigh := currLevel.NextRead() // if currLevel still has vertices to process, get the indices of a ReadBlockSize block of them
@@ -72,41 +72,55 @@ func processLevel(g Graph, currLevel, nextLevel *Frontier, visited *bitvec.ABitV
 			}
 
 			neighbors := g.OutNeighbors(v) // get the outNeighbors of the vertex under inspection
+			//fmt.Println(neighbors)
 			i := 0
 			for ; i < len(neighbors)-3; i += 4 { // unroll loop for visited
 				n1, n2, n3, n4 := neighbors[i], neighbors[i+1], neighbors[i+2], neighbors[i+3]
 				x1, x2, x3, x4 := visited.GetBuckets4(n1, n2, n3, n4)
 				if visited.TrySetWith(x1, n1) { // if not visited, add to the list of vertices for nextLevel
 					nextLevel.Write(&writeLow, &writeHigh, n1)
+					output = append(output, n1)
 				}
 				if visited.TrySetWith(x2, n2) {
 					nextLevel.Write(&writeLow, &writeHigh, n2)
+					output = append(output, n2)
 				}
 				if visited.TrySetWith(x3, n3) {
 					nextLevel.Write(&writeLow, &writeHigh, n3)
+					output = append(output, n3)
 				}
 				if visited.TrySetWith(x4, n4) {
 					nextLevel.Write(&writeLow, &writeHigh, n4)
+					output = append(output, n4)
 				}
 			}
 			for _, n := range neighbors[i:] { // process any remaining (< 4) neighbors for this vertex
 				if visited.TrySet(n) {
 					nextLevel.Write(&writeLow, &writeHigh, n)
+					output = append(output, n)
 				}
 			}
 		}
 	}
-
 	for i := writeLow; i < writeHigh; i++ {
 		nextLevel.Data[i] = EmptySentinel // ensure the rest of the nextLevel block is "empty" using the sentinel
 	}
+	return output
 }
 
 // ParallelBFS computes a vector of levels from src in parallel.
-func ParallelBFS(g Graph, src uint32, procs int) {
+func ParallelBFS(g Graph, src uint32, procs int, hoppingDistance uint32) [][]uint32 {
+
+	var results [][]uint32
+
+	results = append(results, []uint32{src})
+	if hoppingDistance == 0 {
+		return results
+	}
+
 	N := g.NumVertices()
-	vertLevel := make([]uint32, N)
-	visited := bitvec.NewABitVec(N)
+	vertLevel := make([]uint32, N+1)
+	visited := bitvec.NewABitVec(N + 1)
 
 	maxSize := N + (MaxBlockSize * uint32(procs))
 	currLevel := &Frontier{make([]uint32, 0, maxSize), 0}
@@ -121,16 +135,17 @@ func ParallelBFS(g Graph, src uint32, procs int) {
 	wait := make(chan struct{})
 	for len(currLevel.Data) > 0 { // while we have vertices in currentLevel
 
+		var output []uint32
 		async.Spawn(procs, func(i int) { // spawn `procs` goroutines to process vertices in this level,
 			runtime.LockOSThread() // using currLevel as the work queue. Make sure only one goroutine per thread.
-			processLevel(g, currLevel, nextLevel, &visited)
+			output = processLevel(g, currLevel, nextLevel, &visited, output)
 		}, func() { wait <- struct{}{} })
 
 		<-wait // this is equivalent to using a WaitGroup but uses a single channel message instead.
-
+		results = append(results, output)
 		nextLevel.Data = nextLevel.Data[:nextLevel.Head] // "truncate" nextLevel.Data to just the valid data...
 		// ... we need to do this because Frontier.ReadNext uses `len`.
-
+		//output = append(output, nextLevel.Data)
 		sentinelCount := uint32(0)
 		// now sort nextLevel by block. After this, all data within a given block will be sorted. This ensures that
 		// "most" data are ordered, which preserves some linearity in cache access, but this might not be significant.
@@ -142,17 +157,23 @@ func ParallelBFS(g Graph, src uint32, procs int) {
 					atomic.AddUint32(&sentinelCount, uint32(high-low-index))
 					break
 				}
+				//fmt.Println(len(vertLevel), v)
 				vertLevel[v] = currentLevel
 			}
 		})
 
-		// fmt.Printf("completed level %d, size = %d\n", currentLevel-1, len(nextLevel.Data)-int(sentinelCount))
+		//fmt.Printf("completed level %d, size = %d\n", currentLevel-1, len(nextLevel.Data)-int(sentinelCount), output)
 
 		currentLevel++
+		if currentLevel-2 == hoppingDistance {
+			break
+		}
 		currLevel, nextLevel = nextLevel, currLevel
 		currLevel.Head = 0 // start reading from 0
 		// reset buffer for next level
 		nextLevel.Data = nextLevel.Data[:maxSize:maxSize] // resize the buffer to `maxSize` elements. We don't care what's in it, because...
 		nextLevel.Head = 0                                // ... we start writing to index 0.
 	}
+
+	return results
 }
