@@ -49,6 +49,7 @@ func (it EdgeIter) Next() (e Edge, done bool) {
 
 // Graph is a graph structure representing an undirected graph.
 type Graph struct {
+	max      uint32
 	fmx, bmx graphmatrix.GraphMatrix
 }
 
@@ -57,7 +58,7 @@ func (g Graph) String() string {
 }
 
 // MakeGraph creates an undirected graph from vectors of source and dest vertices.
-func New(ss, ds []uint32) (Graph, error) {
+func New(ss, ds []uint32, max uint32) (Graph, error) {
 	r_ss := make([]uint32, len(ss))
 	r_ds := make([]uint32, len(ds))
 	copy(r_ss, ss)
@@ -73,17 +74,26 @@ func New(ss, ds []uint32) (Graph, error) {
 	if err != nil {
 		return Graph{}, err
 	}
-	return Graph{fmx: fmx, bmx: bmx}, nil
+	return Graph{fmx: fmx, bmx: bmx, max: max}, nil
 }
 
 func NewFromEdgeList(l EdgeList) (Graph, error) {
+
+	var max uint32
+
 	ss := make([]uint32, len(l))
 	ds := make([]uint32, len(l))
 	for i, e := range l {
 		ss[i] = e.Src
 		ds[i] = e.Dst
+		if e.Src > max {
+			max = e.Src
+		}
+		if e.Dst > max {
+			max = e.Src
+		}
 	}
-	return New(ss, ds)
+	return New(ss, ds, max)
 }
 
 // OutDegree returns the out degree of vertex u.
@@ -131,7 +141,7 @@ func (g Graph) NumEdges() uint64 {
 
 // Order returns the number of vertices
 func (g Graph) NumVertices() uint32 {
-	return g.fmx.Dim()
+	return g.max
 }
 
 // Edges returns an iterator of edges
@@ -152,5 +162,5 @@ func (g Graph) BMat() graphmatrix.GraphMatrix {
 func FromRaw(findptr []uint64, find []uint32, bindptr []uint64, bind []uint32) (Graph, error) {
 	fmx := graphmatrix.GraphMatrix{IndPtr: findptr, Indices: find}
 	bmx := graphmatrix.GraphMatrix{IndPtr: bindptr, Indices: bind}
-	return Graph{fmx, bmx}, nil
+	return Graph{0, fmx, bmx}, nil
 }
